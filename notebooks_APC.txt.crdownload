@@ -1,0 +1,1434 @@
+# # Jupyter Notebook Template: Nanoelectronics - Process Optimisation and Fault Detection
+# 
+# # ---------- 0. Notebook Introduction ----------
+# from IPython.display import Markdown, display
+# 
+# display(Markdown("""
+# # **Nanoelectronics: Process Optimisation and Fault Detection**
+# 
+# **COURSE:** Advanced Processing Methods and Optimisation
+# **COURSE CODE:** CHEE 1009
+# **INSTRUCTOR:** Dr. Susantha (Jeff) Dissanayake
+# 
+# **UNIVERSITY:** University of Greenwich
+# **CAMPUS:** Medway, Chatham Maritime
+# **LOCATION:** Central Avenue, Chatham Maritime, ME4 4TB, United Kingdom
+# 
+# **STUDENT NAME:** Jyoti Ramesh Barmar
+# **STUDENT ID:** 001433157
+# **DATE:** March 2026
+# """))
+# 
+# # ---------- 1. Description ----------
+# display(Markdown("""
+# ## 1. Project Description
+# 
+# This project focuses on process optimisation and fault detection in **nanoelectronic chemical systems** using the Tennessee Eastman Process (TEP) dataset.
+# Machine learning models, specifically **Multilayer Perceptrons (MLP)**, are implemented to detect process faults and identify optimal operating conditions.
+# """))
+# 
+# # ---------- 2. Objectives ----------
+# display(Markdown("""
+# ## 2. Project Objectives
+# 
+# 1. Understand machine learning applications in chemical process fault detection.
+# 2. Preprocess and analyse the Tennessee Eastman Process dataset.
+# 3. Apply PCA for dimensionality reduction and visualization.
+# 4. Develop and train an MLP neural network for fault classification.
+# 5. Evaluate models using classification metrics and confusion matrices.
+# 6. Provide actionable insights for process optimisation.
+# """))
+# 
+# # ---------- 3. Literature Review ----------
+# display(Markdown("""
+# ## 3. Literature Review
+# 
+# - Review existing fault detection methods in chemical processes.
+# - Examine prior work using the Tennessee Eastman Process as a benchmark.
+# - Explore MLP and other machine learning models (SVM, Random Forest, LSTM) in multivariate time-series analysis.
+# - Investigate dimensionality reduction techniques (PCA, t-SNE) for process monitoring.
+# - Address challenges such as imbalanced datasets, sensor noise, and real-time monitoring.
+# """))
+# 
+# # ---------- 4. Methods ----------
+# display(Markdown("""
+# ## 4. Methods
+# 
+# 1. **Data Loading**: Load TEP dataset (fault-free and faulty) or generate synthetic demo data.
+# 2. **Preprocessing**: Handle missing values, standardize features using StandardScaler.
+# 3. **Feature Engineering**: Extract relevant process variables and optionally compute derivatives or lag features.
+# 4. **Dimensionality Reduction**: Apply PCA for visualization and correlation analysis.
+# 5. **ML Model Development**: Train an MLP neural network for multi-class fault classification.
+# 6. **Model Evaluation**: Use classification metrics, confusion matrices, and visualizations.
+# 7. **Results Interpretation**: Identify most detectable faults, analyze feature importance, and suggest process optimisation strategies.
+# """))
+
+# This module is used to load datasets from various file formats and perform initial preprocessing steps such as missing value analysis, data standardisation, and feature preparation. This ensures that the dataset is clean and suitable for machine learning model development.
+
+"""
+data_loader.py
+
+Purpose
+-------
+Utility functions for robust dataset loading and first-pass inspection for
+a Nanoelectronics / Fault Detection ML pipeline.
+
+Features
+--------
+- Load from CSV, Excel, MAT, NPZ, HDF5, Pickle.
+- Auto-detect file type when path provided.
+- Basic metadata and missing-value report.
+- Optionally:
+    - select features and target column
+    - drop or impute missing values
+    - standardize / normalize numeric columns
+    - save a cleaned copy
+
+Returns
+-------
+A tuple: (pandas.DataFrame, dict(metadata))
+"""
+
+import os
+import warnings
+from typing import Optional, Tuple, Dict, Any, List, Union
+
+import numpy as np
+import pandas as pd
+
+# Optional dependencies for some file formats
+try:
+    import scipy.io as sio  # for .mat
+except Exception:
+    sio = None
+try:
+    import h5py  # for hdf5 inspection
+except Exception:
+    h5py = None
+
+
+# -------------------------
+# Helper loading functions
+# -------------------------
+def _load_csv(path: str, **kwargs) -> pd.DataFrame:
+    return pd.read_csv(path, **kwargs)
+
+
+def _load_excel(path: str, sheet_name: Union[str, int] = 0, **kwargs) -> pd.DataFrame:
+    return pd.read_excel(path, sheet_name=sheet_name, **kwargs)
+
+
+def _load_mat(path: str, varname: Optional[str] = None) -> pd.DataFrame:
+    if sio is None:
+        raise ImportError("scipy is required to load MATLAB .mat files. Install scipy.")
+    mat = sio.loadmat(path, squeeze_me=True, struct_as_record=False)
+    # If user provided a varname, try to extract it
+    if varname:
+        if varname not in mat:
+            raise KeyError(f"Variable '{varname}' not found in {path}. Available keys: {list(mat.keys())}")
+        arr = mat[varname]
+    else:
+        # attempt common keys
+        candidates = [k for k in mat.keys() if not k.startswith("__")]
+        if len(candidates) == 1:
+            arr = mat[candidates[0]]
+        else:
+            # pick the largest array-like key
+            arr = None
+            maxsize = 0
+            for k in candidates:
+                val = mat[k]
+                try:
+                    s = np.array(val).size
+                    if s > maxsize:
+                        arr = val
+                        maxsize = s
+                except Exception:
+                    continue
+            if arr is None:
+                raise RuntimeError("Couldn't auto-select a variable from the .mat file; pass varname argument.")
+    # Convert to DataFrame if 2D-like
+    arr = np.asarray(arr)
+    if arr.ndim == 2:
+        return pd.DataFrame(arr)
+    elif arr.ndim == 1:
+        return pd.DataFrame(arr, columns=[varname or "var"])
+    else:
+        raise ValueError("Loaded .mat variable has ndim > 2; provide preprocessing outside loader.")
+
+
+def _load_npz(path: str) -> pd.DataFrame:
+    with np.load(path, allow_pickle=True) as d:
+        # If single array present, return that; else try to find 'data' or first large array
+        keys = list(d.keys())
+        if len(keys) == 1:
+            arr = d[keys[0]]
+            arr = np.asarray(arr)
+            if arr.ndim == 2:
+                return pd.DataFrame(arr)
+            elif arr.ndim == 1:
+                return pd.DataFrame(arr, columns=[keys[0]])
+        # multiple arrays: create DataFrame if shapes align across first dimension
+        shapes = [np.shape(d[k]) for k in keys]
+        first_dim = [s[0] if len(s) > 0 else None for s in shapes]
+        if all(fd == first_dim[0] for fd in first_dim):
+            df = pd.DataFrame({k: d[k] for k in keys})
+            return df
+        else:
+            # fallback: return dictionary-like DataFrame with object dtype
+            return pd.DataFrame({k: d[k] for k in keys})
+
+
+def _load_pickle(path: str) -> pd.DataFrame:
+    obj = pd.read_pickle(path)
+    if isinstance(obj, pd.DataFrame):
+        return obj
+    else:
+        # try to convert to DataFrame
+        try:
+            return pd.DataFrame(obj)
+        except Exception as e:
+            raise ValueError(f"Pickle loaded object of type {type(obj)} cannot be converted to DataFrame: {e}")
+
+
+def _load_hdf5(path: str, key: Optional[str] = None) -> pd.DataFrame:
+    if key is not None:
+        return pd.read_hdf(path, key)
+    else:
+        # try to guess the key
+        with pd.HDFStore(path, mode='r') as store:
+            keys = store.keys()
+            if len(keys) == 0:
+                raise KeyError("No datasets found in HDF5 file.")
+            # choose first key
+            chosen = keys[0].lstrip('/')
+            return pd.read_hdf(path, chosen)
+
+
+# -------------------------
+# Main loader
+# -------------------------
+def load_dataset(
+    path: Optional[str] = None,
+    *,
+    file_type: Optional[str] = None,
+    sheet_name: Union[str, int] = 0,
+    mat_varname: Optional[str] = None,
+    hdf_key: Optional[str] = None,
+    index_col: Optional[Union[int, str]] = None,
+    dtype: Optional[dict] = None,
+    parse_dates: Optional[List[str]] = None,
+    verbose: bool = True
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Load a dataset from `path` and return (df, metadata).
+
+    Parameters
+    ----------
+    path : str or None
+        Path to the dataset file. If None, a synthetic dataset is returned.
+    file_type : str or None
+        One of: 'csv', 'excel', 'mat', 'npz', 'hdf5', 'pickle'. If None, auto-detected from extension.
+    sheet_name : for excel
+    mat_varname : optional variable name when loading .mat
+    hdf_key : key when loading hdf5
+    index_col : column to use as index
+    dtype : dict, optional dtypes to pass to pandas.read_csv/read_excel
+    parse_dates : list of columns to parse as dates
+    verbose : bool
+        print metadata and missing-value report if True.
+
+    Returns
+    -------
+    df : pandas.DataFrame
+    metadata : dict
+        includes source, shape, dtypes, missing_counts, column_names
+    """
+    if path is None:
+        # generate a synthetic dataset for quick testing
+        from sklearn.datasets import make_classification
+        X, y = make_classification(n_samples=1000, n_features=20, n_informative=6, n_redundant=2,
+                                   n_classes=2, random_state=42)
+        cols = [f"x{i+1}" for i in range(X.shape[1])]
+        df = pd.DataFrame(X, columns=cols)
+        df['target'] = y
+        metadata = {
+            "source": "synthetic:sklearn.make_classification",
+            "shape": df.shape,
+            "columns": df.columns.tolist()
+        }
+        if verbose:
+            print(f"[INFO] Generated synthetic dataset: shape={df.shape}")
+        return df, metadata
+
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"File not found: {path}")
+
+    ext = os.path.splitext(path)[1].lower()
+    if file_type is None:
+        if ext in ['.csv']:
+            file_type = 'csv'
+        elif ext in ['.xls', '.xlsx']:
+            file_type = 'excel'
+        elif ext in ['.mat']:
+            file_type = 'mat'
+        elif ext in ['.npz', '.npy']:
+            file_type = 'npz'
+        elif ext in ['.h5', '.hdf5', '.hdf']:
+            file_type = 'hdf5'
+        elif ext in ['.pkl', '.pickle']:
+            file_type = 'pickle'
+        else:
+            # fallback: try pandas read_csv and then read_excel
+            warnings.warn(f"Unknown extension '{ext}', attempting csv -> excel -> pickle -> npz -> mat.")
+            tried = False
+            try:
+                df = pd.read_csv(path)
+                file_type = 'csv'
+                tried = True
+            except Exception:
+                try:
+                    df = pd.read_excel(path)
+                    file_type = 'excel'
+                    tried = True
+                except Exception:
+                    pass
+            if tried:
+                # continue to standard flow below with df already loaded
+                metadata = {
+                    "source": path,
+                    "inferred_file_type": file_type,
+                    "shape": df.shape,
+                    "columns": df.columns.tolist()
+                }
+                # Add missing value report
+                missing = df.isna().sum().to_dict()
+                metadata['missing_counts'] = missing
+                if verbose:
+                    print("[INFO] Auto-detected and loaded (fallback).")
+                    print(metadata)
+                return df, metadata
+            else:
+                raise ValueError(f"Could not determine file type for {path}. Please specify file_type explicitly.")
+
+    # Now load according to file_type
+    if file_type == 'csv':
+        df = _load_csv(path, index_col=index_col, dtype=dtype, parse_dates=parse_dates)
+    elif file_type == 'excel':
+        df = _load_excel(path, sheet_name=sheet_name, index_col=index_col, dtype=dtype)
+    elif file_type == 'mat':
+        df = _load_mat(path, varname=mat_varname)
+    elif file_type in ('npz', 'npy'):
+        df = _load_npz(path)
+    elif file_type == 'pickle':
+        df = _load_pickle(path)
+    elif file_type == 'hdf5':
+        df = _load_hdf5(path, key=hdf_key)
+    else:
+        raise ValueError(f"Unsupported file_type: {file_type}")
+
+    # metadata and quick checks
+    metadata = {
+        "source": path,
+        "file_type": file_type,
+        "shape": df.shape,
+        "columns": df.columns.tolist(),
+        "dtypes": df.dtypes.apply(lambda x: str(x)).to_dict(),
+    }
+
+    # missing values
+    missing_counts = df.isna().sum()
+    metadata['missing_counts'] = missing_counts.to_dict()
+    metadata['missing_fraction'] = (missing_counts / len(df)).to_dict()
+
+    # numeric / categorical split
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    categorical_cols = df.select_dtypes(exclude=[np.number]).columns.tolist()
+    metadata['numeric_columns'] = numeric_cols
+    metadata['categorical_columns'] = categorical_cols
+
+    if verbose:
+        print(f"[INFO] Loaded dataset from {path}")
+        print(f"       file_type: {file_type}")
+        print(f"       shape    : {df.shape}")
+        print(f"       numeric cols  : {len(numeric_cols)}")
+        print(f"       categorical cols: {len(categorical_cols)}")
+        n_missing = missing_counts.sum()
+        print(f"       missing values : {n_missing} ({n_missing/ (df.shape[0]*df.shape[1]):.2%} of cells)")
+        # show top 10 missing columns if any
+        ms_sorted = missing_counts[missing_counts > 0].sort_values(ascending=False)
+        if len(ms_sorted) > 0:
+            print("       top missing columns:")
+            print(ms_sorted.head(10).to_string())
+
+    return df, metadata
+
+
+# -------------------------
+# Simple cleaning helpers
+# -------------------------
+def basic_impute(df: pd.DataFrame, strategy: str = 'mean', fill_value: Optional[Any] = None,
+                 numeric_only: bool = True) -> pd.DataFrame:
+    """
+    Basic imputation helper: 'mean', 'median', 'mode', or 'constant' (fill_value required).
+    """
+    df = df.copy()
+    if strategy not in ('mean', 'median', 'mode', 'constant'):
+        raise ValueError("strategy must be one of 'mean','median','mode','constant'")
+
+    if numeric_only:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+    else:
+        numeric_cols = df.columns
+
+    if strategy == 'mean':
+        for c in numeric_cols:
+            if df[c].isna().any():
+                df[c].fillna(df[c].mean(), inplace=True)
+    elif strategy == 'median':
+        for c in numeric_cols:
+            if df[c].isna().any():
+                df[c].fillna(df[c].median(), inplace=True)
+    elif strategy == 'mode':
+        for c in numeric_cols:
+            if df[c].isna().any():
+                df[c].fillna(df[c].mode().iloc[0] if not df[c].mode().empty else df[c].dropna().iloc[0], inplace=True)
+    elif strategy == 'constant':
+        if fill_value is None:
+            raise ValueError("fill_value must be provided for constant strategy")
+        for c in numeric_cols:
+            df[c].fillna(fill_value, inplace=True)
+
+    return df
+
+
+def drop_high_missing(df: pd.DataFrame, threshold: float = 0.5) -> pd.DataFrame:
+    """
+    Drop columns with fraction of missing values > threshold.
+    threshold: fraction in (0,1)
+    """
+    df = df.copy()
+    frac = df.isna().mean()
+    dropcols = frac[frac > threshold].index.tolist()
+    if len(dropcols) > 0:
+        df.drop(columns=dropcols, inplace=True)
+    return df
+
+
+def standardize_numeric(df: pd.DataFrame, numeric_cols: Optional[List[str]] = None) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Standardize numeric columns to zero mean and unit variance (z-score).
+    Returns (df_standardized, stats_dict) where stats_dict contains mean and std per column.
+    """
+    df = df.copy()
+    if numeric_cols is None:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    stats = {}
+    for c in numeric_cols:
+        mu = df[c].mean()
+        sigma = df[c].std(ddof=0)  # population std
+        if sigma == 0 or np.isnan(sigma):
+            df[c] = 0.0
+            stats[c] = {"mean": float(mu), "std": float(sigma)}
+        else:
+            df[c] = (df[c] - mu) / sigma
+            stats[c] = {"mean": float(mu), "std": float(sigma)}
+    return df, stats
+
+
+# -------------------------
+# Example usage (not run on import)
+# -------------------------
+if __name__ == "__main__":
+    # Example 1: generate synthetic data
+    df_synth, meta_synth = load_dataset(None, verbose=True)
+    print(meta_synth)
+
+    # Example 2: load a CSV file
+    # df, meta = load_dataset("fault_free_training.csv", file_type="csv", verbose=True)
+
+    # Example 3: load a MATLAB file
+    # df_mat, meta_mat = load_dataset("tep_data.mat", file_type="mat", mat_varname="X")
+
+    # Quick cleaning example
+    df_cleaned = basic_impute(df_synth, strategy='mean')
+    df_cleaned = drop_high_missing(df_cleaned, threshold=0.5)
+    df_standardized, stats = standardize_numeric(df_cleaned)
+    print("Standardization stats (first 5):", dict(list(stats.items())[:5]))
+
+
+# """
+# eda.py
+# 
+# Step 2: Exploratory Data Analysis utilities for Nanoelectronics / Fault Detection pipeline.
+# 
+# Dependencies:
+#     pandas, numpy, matplotlib, sklearn, seaborn (optional but recommended)
+# 
+# Functions:
+#     plot_correlation_matrix(df, numeric_cols=None, savepath=None, figsize=(10,8), annotate=False, cmap='viridis')
+#     plot_distributions(df, numeric_cols=None, n_cols=3, bins=50, kde=False, savepath=None, figsize=(12,8), max_plots=30)
+#     plot_missingness_heatmap(df, savepath=None, figsize=(12,6))
+#     plot_pca_variance(df, numeric_cols=None, n_components=None, savepath=None, figsize=(8,5), cumulative=True)
+# """
+# 
+# from typing import List, Optional
+# import numpy as np
+# import pandas as pd
+# import matplotlib.pyplot as plt
+# from sklearn.decomposition import PCA
+# 
+# # seaborn for nicer heatmaps and distribution overlays; optional but recommended
+# try:
+#     import seaborn as sns
+#     _HAS_SNS = True
+# except Exception:
+#     _HAS_SNS = False
+# 
+# 
+# def _select_numeric(df: pd.DataFrame, numeric_cols: Optional[List[str]] = None) -> pd.DataFrame:
+#     if numeric_cols is None:
+#         return df.select_dtypes(include=[np.number]).copy()
+#     else:
+#         missing = [c for c in numeric_cols if c not in df.columns]
+#         if missing:
+#             raise ValueError(f"Columns not in DataFrame: {missing}")
+#         return df[numeric_cols].copy()
+# 
+# 
+# def plot_correlation_matrix(
+#     df: pd.DataFrame,
+#     numeric_cols: Optional[List[str]] = None,
+#     savepath: Optional[str] = None,
+#     figsize: tuple = (10, 8),
+#     annotate: bool = False,
+#     cmap: str = 'coolwarm',
+#     mask_upper: bool = True,
+#     vmax: Optional[float] = None,
+# ):
+#     """
+#     Plot correlation matrix heatmap for numeric features.
+#     - If seaborn is available, uses sns.heatmap. Otherwise uses matplotlib pcolor.
+#     - mask_upper: if True, hide the upper triangle for readability.
+#     """
+#     num_df = _select_numeric(df, numeric_cols)
+#     if num_df.shape[1] == 0:
+#         raise ValueError("No numeric columns found for correlation matrix.")
+# 
+#     corr = num_df.corr()
+#     if vmax is None:
+#         vmax = 1.0
+# 
+#     plt.figure(figsize=figsize)
+#     if _HAS_SNS:
+#         mask = None
+#         if mask_upper:
+#             mask = np.triu(np.ones_like(corr, dtype=bool))
+#         sns.heatmap(corr, annot=annotate, fmt=".2f", cmap=cmap, vmin=-vmax, vmax=vmax,
+#                     linewidths=0.5, linecolor='gray', mask=mask, square=True)
+#         plt.title("Correlation matrix")
+#     else:
+#         plt.pcolor(corr, cmap=cmap, vmin=-vmax, vmax=vmax)
+#         plt.colorbar()
+#         plt.xticks(np.arange(0.5, len(corr.index), 1), corr.columns, rotation=90)
+#         plt.yticks(np.arange(0.5, len(corr.index), 1), corr.index)
+#         plt.title("Correlation matrix (no seaborn)")
+#     plt.tight_layout()
+#     if savepath:
+#         plt.savefig(savepath, dpi=200)
+#     plt.show()
+# 
+# 
+# def plot_distributions(
+#     df: pd.DataFrame,
+#     numeric_cols: Optional[List[str]] = None,
+#     n_cols: int = 3,
+#     bins: int = 50,
+#     kde: bool = False,
+#     savepath: Optional[str] = None,
+#     figsize: tuple = (12, 8),
+#     max_plots: int = 30,
+# ):
+#     """
+#     Plot histograms (and optional KDE) for numeric columns.
+#     - max_plots limits the number of subplots shown (to keep plots readable).
+#     - Arranges subplots in a grid of n_cols columns.
+#     """
+#     num_df = _select_numeric(df, numeric_cols)
+#     cols = num_df.columns.tolist()
+#     if len(cols) == 0:
+#         raise ValueError("No numeric columns to plot distributions for.")
+#     cols = cols[:max_plots]
+# 
+#     n_plots = len(cols)
+#     n_rows = int(np.ceil(n_plots / n_cols))
+#     plt.figure(figsize=figsize)
+#     for i, c in enumerate(cols, 1):
+#         ax = plt.subplot(n_rows, n_cols, i)
+#         data = num_df[c].dropna()
+#         ax.hist(data, bins=bins, density=False, alpha=0.75)
+#         if kde:
+#             if _HAS_SNS:
+#                 sns.kdeplot(data, ax=ax)
+#             else:
+#                 # crude KDE using Gaussian smoothing
+#                 from scipy.stats import gaussian_kde
+#                 try:
+#                     kde_est = gaussian_kde(data)
+#                     xs = np.linspace(np.min(data), np.max(data), 200)
+#                     ax2 = ax.twinx()
+#                     ax2.plot(xs, kde_est(xs), linewidth=1)
+#                     ax2.set_ylabel("KDE")
+#                 except Exception:
+#                     pass
+#         ax.set_title(c)
+#         ax.tick_params(axis='x', labelrotation=20)
+#     plt.tight_layout()
+#     if savepath:
+#         plt.savefig(savepath, dpi=200)
+#     plt.show()
+# 
+# 
+# def plot_missingness_heatmap(
+#     df: pd.DataFrame,
+#     savepath: Optional[str] = None,
+#     figsize: tuple = (12, 6),
+#     sort_by_missing: bool = True
+# ):
+#     """
+#     Plot a missingness heatmap where rows are samples and columns are features.
+#     For large datasets this will plot a sample (first 2000 rows) to keep it readable.
+#     """
+#     nmax = 2000
+#     sample_df = df.head(nmax).isna().astype(int)
+#     if sort_by_missing:
+#         col_order = sample_df.sum(axis=0).sort_values(ascending=False).index.tolist()
+#         sample_df = sample_df[col_order]
+# 
+#     plt.figure(figsize=figsize)
+#     if _HAS_SNS:
+#         sns.heatmap(sample_df.T, cbar=False, cmap='Greys', linewidths=0.2)
+#         plt.xlabel(f"rows (first {min(nmax, len(df))})")
+#         plt.ylabel("features")
+#         plt.title("Missingness heatmap (1 = missing)")
+#     else:
+#         plt.imshow(sample_df.T.values, aspect='auto', interpolation='nearest', cmap='gray_r')
+#         plt.yticks(range(sample_df.shape[1]), sample_df.columns)
+#         plt.xlabel(f"rows (first {min(nmax, len(df))})")
+#         plt.title("Missingness heatmap")
+#     plt.tight_layout()
+#     if savepath:
+#         plt.savefig(savepath, dpi=200)
+#     plt.show()
+# 
+# 
+# def plot_pca_variance(
+#     df: pd.DataFrame,
+#     numeric_cols: Optional[List[str]] = None,
+#     n_components: Optional[int] = None,
+#     savepath: Optional[str] = None,
+#     figsize: tuple = (8, 5),
+#     cumulative: bool = True,
+#     standardize: bool = True
+# ):
+#     """
+#     Fit PCA on numeric columns and plot explained variance ratio.
+#     - If standardize=True, data is z-scored before PCA.
+#     """
+#     num_df = _select_numeric(df, numeric_cols)
+#     if num_df.shape[1] == 0:
+#         raise ValueError("No numeric columns found for PCA.")
+# 
+#     X = num_df.values
+#     # standardize if requested
+#     if standardize:
+#         X = (X - np.nanmean(X, axis=0)) / (np.nanstd(X, axis=0, ddof=0) + 1e-12)
+# 
+#     max_comp = min(X.shape[1], X.shape[0])
+#     if n_components is None:
+#         n_components = max_comp
+#     else:
+#         n_components = min(n_components, max_comp)
+# 
+#     pca = PCA(n_components=n_components)
+#     pca.fit(X)
+#     explained = pca.explained_variance_ratio_
+#     components = np.arange(1, len(explained) + 1)
+# 
+#     plt.figure(figsize=figsize)
+#     if cumulative:
+#         cumvar = np.cumsum(explained)
+#         plt.plot(components, cumvar, marker='o', linestyle='-')
+#         plt.ylabel("Cumulative explained variance")
+#         plt.ylim(0, 1.05)
+#         for i, val in enumerate(cumvar):
+#             if i % max(1, len(cumvar)//10) == 0:
+#                 plt.text(components[i], cumvar[i], f"{cumvar[i]:.2f}")
+#     else:
+#         plt.bar(components, explained)
+#         plt.ylabel("Explained variance ratio")
+#     plt.xlabel("Principal component")
+#     plt.title("PCA explained variance" + (" (cumulative)" if cumulative else ""))
+#     plt.grid(True, linestyle=':', alpha=0.6)
+#     plt.tight_layout()
+#     if savepath:
+#         plt.savefig(savepath, dpi=200)
+#     plt.show()
+# 
+# 
+# # -------------------------
+# # Example usage
+# # -------------------------
+# if __name__ == "__main__":
+#     # Example: using synthetic dataset when run standalone
+#     from sklearn.datasets import make_classification
+#     X, y = make_classification(n_samples=1000, n_features=20, n_informative=6, n_redundant=2,
+#                                n_classes=2, random_state=42)
+#     cols = [f"x{i+1}" for i in range(X.shape[1])]
+#     df = pd.DataFrame(X, columns=cols)
+#     df['target'] = y
+# 
+#     # 1. Correlation matrix for numeric columns excluding target (optional)
+#     numeric_cols = [c for c in df.columns if c != 'target']
+#     plot_correlation_matrix(df, numeric_cols=numeric_cols, annotate=False)
+# 
+#     # 2. Distribution plots (first 12 numeric features)
+#     plot_distributions(df, numeric_cols=numeric_cols[:12], n_cols=4, kde=True)
+# 
+#     # 3. Missingness heatmap (none in synthetic example)
+#     plot_missingness_heatmap(df)
+# 
+#     # 4. PCA explained variance
+#     plot_pca_variance(df, numeric_cols=numeric_cols, cumulative=True)
+# 
+
+# The PCA-SVM visualisation provides insight into the separability of the dataset. If the classes overlap significantly in the PCA space, it indicates that the original features do not strongly differentiate between fault conditions.
+# 
+# In this case, the SVM decision boundary attempts to separate the classes, but overlapping regions suggest that classification accuracy may be limited. This highlights the complexity of the dataset and the need for additional feature engineering or more advanced models.
+# 
+# From an industrial perspective, poor separation between fault and normal conditions can lead to unreliable predictions, which may affect maintenance decisions and system safety.
+
+"""
+Step 3: PCA Scatter Plot with SVM Decision Boundary
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from matplotlib.colors import ListedColormap
+
+def pca_svm_scatter(
+    df: pd.DataFrame,
+    numeric_cols: list,
+    target_col: str,
+    test_size: float = 0.2,
+    random_state: int = 42,
+    kernel: str = 'rbf',
+    C: float = 1.0,
+    gamma: str = 'scale',
+    figsize: tuple = (8, 6),
+    savepath: str = None
+):
+    """
+    Perform PCA (2 components), train an SVM classifier, and plot the scatter
+    of the first 2 PCs with SVM decision boundary.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Input dataset
+    numeric_cols : list
+        Numeric feature columns
+    target_col : str
+        Label column
+    """
+    # 1. Prepare data
+    X = df[numeric_cols].values
+    y = df[target_col].values
+
+    # Standardize features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    # PCA reduction to 2 components
+    pca = PCA(n_components=2)
+    X_pca = pca.fit_transform(X_scaled)
+
+    # Train/test split
+    X_train, X_test, y_train, y_test = train_test_split(X_pca, y, test_size=test_size, random_state=random_state, stratify=y)
+
+    # SVM classifier
+    svm = SVC(kernel=kernel, C=C, gamma=gamma, probability=True, random_state=random_state)
+    svm.fit(X_train, y_train)
+
+    # Prepare meshgrid for decision boundary
+    x_min, x_max = X_pca[:, 0].min() - 1, X_pca[:, 0].max() + 1
+    y_min, y_max = X_pca[:, 1].min() - 1, X_pca[:, 1].max() + 1
+    xx, yy = np.meshgrid(np.arange(x_min, x_max, 0.02),
+                         np.arange(y_min, y_max, 0.02))
+    Z = svm.predict(np.c_[xx.ravel(), yy.ravel()])
+    Z = Z.reshape(xx.shape)
+
+    # Plot
+    plt.figure(figsize=figsize)
+    cmap_light = ListedColormap(['#FFAAAA', '#AAAAFF', '#AAFFAA'])
+    cmap_bold = ListedColormap(['#FF0000', '#0000FF', '#00AA00'])
+    plt.contourf(xx, yy, Z, alpha=0.2, cmap=cmap_light)
+
+    # Scatter points
+    for label in np.unique(y):
+        idx = np.where(y == label)
+        plt.scatter(X_pca[idx, 0], X_pca[idx, 1], label=f"Class {label}", cmap=cmap_bold, edgecolor='k', s=50)
+
+    plt.xlabel("PC1")
+    plt.ylabel("PC2")
+    plt.title("PCA Scatter Plot with SVM Decision Boundary")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+
+    if savepath:
+        plt.savefig(savepath, dpi=200)
+    plt.show()
+
+    # Return objects for further analysis
+    return X_pca, y, svm, pca, scaler
+
+
+# -------------------------
+# Example usage
+# -------------------------
+if __name__ == "__main__":
+    from sklearn.datasets import make_classification
+    # Synthetic dataset
+    X, y = make_classification(n_samples=500, n_features=10, n_informative=6, n_redundant=2,
+                               n_classes=2, random_state=42)
+    cols = [f"x{i+1}" for i in range(X.shape[1])]
+    df = pd.DataFrame(X, columns=cols)
+    df['target'] = y
+
+    X_pca, y_vals, svm_model, pca_model, scaler = pca_svm_scatter(df, numeric_cols=cols, target_col='target')
+
+
+# """
+# step3_pca_svm.py
+# 
+# - Performs PCA to reduce data to 2D (PC1 & PC2)
+# - Trains a linear or RBF SVM classifier on the 2 PCs
+# - Plots the scatter with decision boundaries
+# """
+# 
+# import numpy as np
+# import pandas as pd
+# import matplotlib.pyplot as plt
+# from sklearn.decomposition import PCA
+# from sklearn.svm import SVC
+# from sklearn.preprocessing import StandardScaler
+# 
+# # Optional: seaborn for nicer plots
+# try:
+#     import seaborn as sns
+#     sns.set(style="whitegrid")
+# except:
+#     pass
+# 
+# # -------------------------
+# # Function: PCA + SVM scatter
+# # -------------------------
+# def plot_pca_svm(
+#     df: pd.DataFrame,
+#     target_col: str,
+#     numeric_cols: list = None,
+#     svm_kernel: str = 'rbf',
+#     C: float = 1.0,
+#     gamma: str = 'scale',
+#     figsize=(8,6),
+#     title="PCA Scatter with SVM Decision Boundary"
+# ):
+#     """
+#     Args:
+#         df : pandas DataFrame containing features + target
+#         target_col : column name with class labels (categorical)
+#         numeric_cols : list of columns to use as features (default: all numeric except target)
+#         svm_kernel : SVM kernel ('linear', 'rbf', 'poly')
+#         C : regularization parameter
+#         gamma : kernel coefficient for rbf/poly
+#     """
+#     # Select numeric features
+#     if numeric_cols is None:
+#         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+#         if target_col in numeric_cols:
+#             numeric_cols.remove(target_col)
+#     X = df[numeric_cols].values
+#     y = df[target_col].values
+# 
+#     # Standardize features
+#     scaler = StandardScaler()
+#     X_scaled = scaler.fit_transform(X)
+# 
+#     # PCA to 2D
+#     pca = PCA(n_components=2)
+#     X_pca = pca.fit_transform(X_scaled)
+#     print(f"[INFO] PCA explained variance ratio: {pca.explained_variance_ratio_}")
+# 
+#     # Fit SVM on PCA components
+#     clf = SVC(kernel=svm_kernel, C=C, gamma=gamma, probability=True)
+#     clf.fit(X_pca, y)
+# 
+#     # Create meshgrid for decision boundary
+#     x_min, x_max = X_pca[:, 0].min() - 1, X_pca[:, 0].max() + 1
+#     y_min, y_max = X_pca[:, 1].min() - 1, X_pca[:, 1].max() + 1
+#     xx, yy = np.meshgrid(np.linspace(x_min, x_max, 500),
+#                          np.linspace(y_min, y_max, 500))
+#     Z = clf.predict(np.c_[xx.ravel(), yy.ravel()]).reshape(xx.shape)
+# 
+#     # Plot
+#     plt.figure(figsize=figsize)
+#     plt.contourf(xx, yy, Z, alpha=0.2, cmap=plt.cm.coolwarm)
+#     scatter = plt.scatter(X_pca[:, 0], X_pca[:, 1], c=y, cmap=plt.cm.coolwarm, edgecolor='k', s=50)
+#     plt.xlabel("PC1")
+#     plt.ylabel("PC2")
+#     plt.title(title)
+#     plt.colorbar(scatter, label="Target class")
+#     plt.tight_layout()
+#     plt.show()
+# 
+#     return clf, pca, scaler, X_pca
+# 
+# 
+# # -------------------------
+# # Example usage
+# # -------------------------
+# if __name__ == "__main__":
+#     # Use synthetic dataset for demonstration
+#     from sklearn.datasets import make_classification
+#     X, y = make_classification(n_samples=500, n_features=10, n_informative=5,
+#                                n_redundant=2, n_classes=2, random_state=42)
+#     df_demo = pd.DataFrame(X, columns=[f"x{i+1}" for i in range(X.shape[1])])
+#     df_demo['target'] = y
+# 
+#     clf, pca, scaler, X_pca = plot_pca_svm(df_demo, target_col='target', svm_kernel='rbf')
+# 
+
+# The PCA scatter plot provides a two-dimensional representation of the dataset using the first two principal components. The SVM decision boundary divides the feature space into regions corresponding to different classes.
+# 
+# If the data points from different classes overlap significantly, it indicates that the features do not strongly distinguish between classes. This can result in lower classification accuracy.
+# 
+# In this case, the presence of overlapping regions suggests that the dataset is complex and may require additional feature engineering or more advanced models. From an industrial perspective, poor class separation can lead to unreliable fault detection, which may affect system safety and maintenance decisions.
+
+# This script implements a complete machine learning pipeline for fault detection, including:
+# 
+# Data splitting (training/testing)
+# Feature scaling (standardisation)
+# Training multiple models:
+# Support Vector Machine (SVM)
+# Random Forest (RF)
+# Multilayer Perceptron (MLP)
+# Model evaluation using:
+# Accuracy
+# Confusion Matrix
+# Classification Report
+# ROC Curve
+# 
+# 👉 Goal: Compare models and identify the best algorithm for fault detection in chemical systems.
+
+"""
+step4_ml_pipeline.py
+
+Full ML pipeline for Fault Detection:
+- Train/Test split
+- Standardization
+- Models: SVM, Random Forest, MLP
+- Evaluation: accuracy, confusion matrix, classification report
+- Visualizations: confusion matrices, ROC curves
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, label_binarize
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report, roc_curve, auc
+from sklearn.svm import SVC
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neural_network import MLPClassifier
+
+# Optional seaborn for nicer plots
+try:
+    import seaborn as sns
+    sns.set(style="whitegrid")
+except:
+    pass
+
+# -------------------------
+# Utility functions
+# -------------------------
+def plot_confusion_matrix(cm, classes, title='Confusion matrix', cmap=plt.cm.Blues):
+    plt.figure(figsize=(6,5))
+    plt.imshow(cm, interpolation='nearest', cmap=cmap)
+    plt.title(title)
+    plt.colorbar()
+    tick_marks = np.arange(len(classes))
+    plt.xticks(tick_marks, classes, rotation=45)
+    plt.yticks(tick_marks, classes)
+    fmt = 'd'
+    thresh = cm.max() / 2.
+    for i, j in np.ndindex(cm.shape):
+        plt.text(j, i, format(cm[i, j], fmt),
+                 horizontalalignment="center",
+                 color="white" if cm[i, j] > thresh else "black")
+    plt.ylabel('True label')
+    plt.xlabel('Predicted label')
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_roc_curves(models, X_test, y_test, n_classes):
+    plt.figure(figsize=(8,6))
+    for name, clf in models.items():
+        if n_classes == 2:
+            y_score = clf.decision_function(X_test) if hasattr(clf, "decision_function") else clf.predict_proba(X_test)[:,1]
+            fpr, tpr, _ = roc_curve(y_test, y_score)
+            roc_auc = auc(fpr, tpr)
+            plt.plot(fpr, tpr, label=f'{name} (AUC={roc_auc:.2f})')
+        else:
+            # multi-class: one-vs-rest
+            y_bin = label_binarize(y_test, classes=np.arange(n_classes))
+            y_score = clf.predict_proba(X_test)
+            for i in range(n_classes):
+                fpr, tpr, _ = roc_curve(y_bin[:,i], y_score[:,i])
+                roc_auc = auc(fpr, tpr)
+                plt.plot(fpr, tpr, label=f'{name}-class{i} (AUC={roc_auc:.2f})')
+    plt.plot([0,1],[0,1],'k--')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC Curves')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+
+# -------------------------
+# Full ML pipeline
+# -------------------------
+def run_ml_pipeline(df, target_col, test_size=0.2, random_state=42):
+    # Split features and target
+    X = df.drop(columns=[target_col]).values
+    y = df[target_col].values
+
+    # Train/test split
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=random_state, stratify=y)
+
+    # Standardization
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_test = scaler.transform(X_test)
+
+    # Define models
+    models = {
+        "SVM": SVC(kernel='rbf', C=1.0, gamma='scale', probability=True, random_state=random_state),
+        "RandomForest": RandomForestClassifier(n_estimators=200, max_depth=None, random_state=random_state),
+        "MLP": MLPClassifier(hidden_layer_sizes=(64,32), activation='relu', solver='adam', max_iter=500, random_state=random_state)
+    }
+
+    results = {}
+
+    for name, clf in models.items():
+        print(f"\n[INFO] Training {name}...")
+        clf.fit(X_train, y_train)
+        y_pred = clf.predict(X_test)
+        acc = accuracy_score(y_test, y_pred)
+        cm = confusion_matrix(y_test, y_pred)
+        cr = classification_report(y_test, y_pred)
+        results[name] = {"model": clf, "accuracy": acc, "confusion_matrix": cm, "classification_report": cr}
+
+        print(f"{name} Accuracy: {acc:.4f}")
+        print(f"Classification Report:\n{cr}")
+        plot_confusion_matrix(cm, classes=np.unique(y), title=f'{name} Confusion Matrix')
+
+    # ROC Curves
+    n_classes = len(np.unique(y))
+    plot_roc_curves(models, X_test, y_test, n_classes)
+
+    return results, scaler
+
+
+# -------------------------
+# Example usage
+# -------------------------
+if __name__ == "__main__":
+    # Synthetic dataset
+    from sklearn.datasets import make_classification
+    X, y = make_classification(n_samples=1000, n_features=20, n_informative=8, n_redundant=2,
+                               n_classes=2, random_state=42)
+    df_demo = pd.DataFrame(X, columns=[f"x{i+1}" for i in range(X.shape[1])])
+    df_demo['target'] = y
+
+    results, scaler = run_ml_pipeline(df_demo, target_col='target')
+
+
+# Nanoelectronics Fault Detection Notebook Template
+# =================================================
+# Study: Process Optimisation and Fault Detection in Nanoelectronic Systems using ML
+# Modules: Data Loading -> EDA -> PCA + SVM -> ML Pipeline (SVM, RF, MLP)
+
+# -------------------------
+# 1. Imports
+# -------------------------
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler, label_binarize
+from sklearn.model_selection import train_test_split
+from sklearn.svm import SVC
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report, roc_curve, auc
+
+# Optional: seaborn for nicer visuals
+try:
+    import seaborn as sns
+    sns.set(style='whitegrid')
+except:
+    pass
+
+# -------------------------
+# 2. Dataset Loading
+# -------------------------
+# Replace 'fault_free_training.csv' with your dataset path
+try:
+    df = pd.read_csv('fault_free_training.csv')
+    print('Dataset loaded successfully.')
+except FileNotFoundError:
+    print('CSV file not found. Using synthetic demo dataset.')
+    from sklearn.datasets import make_classification
+    X, y = make_classification(n_samples=500, n_features=10, n_informative=5, n_redundant=2, n_classes=2, random_state=42)
+    df = pd.DataFrame(X, columns=[f'x{i+1}' for i in range(X.shape[1])])
+    df['target'] = y
+
+print(df.head())
+
+# -------------------------
+# 3. Exploratory Data Analysis (EDA)
+# -------------------------
+# 3.1 Correlation Matrix
+numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+numeric_cols.remove('target') if 'target' in numeric_cols else None
+
+plt.figure(figsize=(10,8))
+if 'sns' in globals():
+    sns.heatmap(df[numeric_cols].corr(), annot=False, cmap='coolwarm', square=True)
+    plt.title('Correlation Matrix')
+else:
+    plt.matshow(df[numeric_cols].corr(), cmap='coolwarm')
+plt.show()
+
+# 3.2 Distribution Plots
+plt.figure(figsize=(12,8))
+n_cols = 3
+for i, c in enumerate(numeric_cols, 1):
+    plt.subplot(int(np.ceil(len(numeric_cols)/n_cols)), n_cols, i)
+    plt.hist(df[c].dropna(), bins=50, alpha=0.7)
+    plt.title(c)
+plt.tight_layout()
+plt.show()
+
+# 3.3 Missingness Heatmap
+plt.figure(figsize=(12,6))
+if 'sns' in globals():
+    sns.heatmap(df.isna(), cbar=False, cmap='Greys', linewidths=0.2)
+    plt.title('Missingness Heatmap')
+else:
+    plt.imshow(df.isna().values, aspect='auto', cmap='gray_r')
+plt.show()
+
+# 3.4 PCA Explained Variance Plot
+X = df[numeric_cols].values
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+pca = PCA(n_components=min(X_scaled.shape[1], X_scaled.shape[0]))
+pca.fit(X_scaled)
+explained_cum = np.cumsum(pca.explained_variance_ratio_)
+plt.figure(figsize=(8,5))
+plt.plot(range(1,len(explained_cum)+1), explained_cum, marker='o')
+plt.xlabel('Principal Component')
+plt.ylabel('Cumulative Explained Variance')
+plt.title('PCA Explained Variance')
+plt.grid(True)
+plt.show()
+
+# -------------------------
+# 4. PCA Scatter with SVM Decision Boundary
+# -------------------------
+X_pca = PCA(n_components=2).fit_transform(X_scaled)
+y = df['target'].values
+
+clf_svm = SVC(kernel='rbf', C=1.0, gamma='scale', probability=True)
+clf_svm.fit(X_pca, y)
+
+# Meshgrid for boundary
+x_min, x_max = X_pca[:,0].min()-1, X_pca[:,0].max()+1
+y_min, y_max = X_pca[:,1].min()-1, X_pca[:,1].max()+1
+xx, yy = np.meshgrid(np.linspace(x_min,x_max,500), np.linspace(y_min,y_max,500))
+Z = clf_svm.predict(np.c_[xx.ravel(), yy.ravel()]).reshape(xx.shape)
+
+plt.figure(figsize=(8,6))
+plt.contourf(xx, yy, Z, alpha=0.2, cmap=plt.cm.coolwarm)
+plt.scatter(X_pca[:,0], X_pca[:,1], c=y, cmap=plt.cm.coolwarm, edgecolor='k', s=50)
+plt.xlabel('PC1')
+plt.ylabel('PC2')
+plt.title('PCA Scatter with SVM Decision Boundary')
+plt.show()
+
+# -------------------------
+# 5. Full ML Pipeline (SVM, Random Forest, MLP)
+# -------------------------
+X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42, stratify=y)
+
+models = {
+    'SVM': SVC(kernel='rbf', C=1.0, gamma='scale', probability=True, random_state=42),
+    'RandomForest': RandomForestClassifier(n_estimators=200, random_state=42),
+    'MLP': MLPClassifier(hidden_layer_sizes=(64,32), max_iter=500, random_state=42)
+}
+
+for name, clf in models.items():
+    clf.fit(X_train, y_train)
+    y_pred = clf.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
+    cm = confusion_matrix(y_test, y_pred)
+    print(f'[{name}] Accuracy: {acc:.4f}')
+    print(classification_report(y_test, y_pred))
+    # Plot confusion matrix
+    plt.figure(figsize=(5,4))
+    if 'sns' in globals():
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+    else:
+        plt.imshow(cm, cmap='Blues')
+    plt.title(f'{name} Confusion Matrix')
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.show()
+
+# ROC Curves
+plt.figure(figsize=(8,6))
+n_classes = len(np.unique(y))
+for name, clf in models.items():
+    if n_classes == 2:
+        y_score = clf.decision_function(X_test) if hasattr(clf, 'decision_function') else clf.predict_proba(X_test)[:,1]
+        fpr, tpr, _ = roc_curve(y_test, y_score)
+        roc_auc = auc(fpr, tpr)
+        plt.plot(fpr, tpr, label=f'{name} (AUC={roc_auc:.2f})')
+    else:
+        y_bin = label_binarize(y_test, classes=np.arange(n_classes))
+        y_score = clf.predict_proba(X_test)
+        for i in range(n_classes):
+            fpr, tpr, _ = roc_curve(y_bin[:,i], y_score[:,i])
+            roc_auc = auc(fpr, tpr)
+            plt.plot(fpr, tpr, label=f'{name}-class{i} (AUC={roc_auc:.2f})')
+plt.plot([0,1],[0,1],'k--')
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('ROC Curves')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+
+# 🔹 1. Importing Libraries
+# import numpy as np
+# import pandas as pd
+# import matplotlib.pyplot as plt
+# ✔ Purpose:
+# numpy → numerical operations
+# pandas → dataset handling
+# matplotlib → plotting
+# from sklearn.decomposition import PCA
+# from sklearn.preprocessing import StandardScaler
+# PCA → dimensionality reduction
+# StandardScaler → feature normalization
+# from sklearn.svm import SVC
+# from sklearn.ensemble import RandomForestClassifier
+# from sklearn.neural_network import MLPClassifier
+# SVM → classification with boundaries
+# Random Forest → ensemble learning
+# MLP → neural network
+# 🔹 2. Dataset Loading
+# df = pd.read_csv('fault_free_training.csv')
+# ✔ What happens:
+# Loads dataset from CSV file
+# 🔁 Fallback (Important)
+# make_classification(...)
+# ✔ Why:
+# If dataset not found → generates synthetic data
+# 
+# 👉 Ensures:
+# 
+# Code always runs
+# Useful for testing
+# 📊 Output:
+# print(df.head())
+# Displays first 5 rows
+# 
+# 👉 Helps verify:
+# 
+# Data structure
+# Column names
+# 🔹 3. Exploratory Data Analysis (EDA)
+# 🔸 3.1 Correlation Matrix
+# sns.heatmap(df[numeric_cols].corr())
+# ✔ Purpose:
+# Shows relationships between variables
+# 📊 Interpretation:
+# High correlation → redundant features
+# Low correlation → independent variables
+# 
+# 👉 Decision:
+# 
+# Helps in feature selection
+# 🔸 3.2 Distribution Plots
+# plt.hist(df[c].dropna())
+# ✔ Purpose:
+# Shows distribution of each feature
+# 📊 Interpretation:
+# Normal distribution → good for ML
+# Skewed → may need transformation
+# 🔸 3.3 Missing Data Heatmap
+# sns.heatmap(df.isna())
+# ✔ Purpose:
+# Identifies missing values
+# 📊 Interpretation:
+# White/blank → missing data
+# No gaps → clean dataset
+# 
+# 👉 Decision:
+# 
+# Apply imputation if needed
+# 🔸 3.4 PCA Explained Variance
+# explained_cum = np.cumsum(pca.explained_variance_ratio_)
+# ✔ Purpose:
+# Shows how much information PCA retains
+# 📊 Interpretation:
+# 95% variance → sufficient components
+# Fewer components → dimensionality reduction
+# 📌 Why PCA is Used (Important for marks)
+# Reduces complexity
+# Removes redundancy
+# Improves model efficiency
+# Enables visualisation
+# 🔹 4. PCA Scatter + SVM Decision Boundary
+# 🔸 PCA to 2D
+# X_pca = PCA(n_components=2).fit_transform(X_scaled)
+# ✔ Purpose:
+# Reduce dataset to 2 dimensions
+# 🔸 Train SVM
+# clf_svm = SVC(kernel='rbf')
+# ✔ Purpose:
+# Learn boundary between classes
+# 🔸 Decision Boundary
+# Z = clf_svm.predict(...)
+# ✔ What happens:
+# Creates classification regions
+# 📊 Plot Interpretation (VERY IMPORTANT)
+# ✔ If clear separation:
+# Model performs well
+# ✔ If overlap:
+# Hard to distinguish faults
+# ✔ Curved boundary:
+# Nonlinear relationships present
+# 🧠 Discussion Example:
+# 
+# The PCA scatter plot shows partial overlap between classes, indicating that the features may not completely separate fault and normal conditions. The nonlinear SVM boundary suggests complex relationships within the dataset.
+# 
+# 🔹 5. Machine Learning Pipeline
+# 🔸 5.1 Train-Test Split
+# train_test_split(..., stratify=y)
+# ✔ Purpose:
+# Split data into training and testing
+# 
+# 👉 stratify=y:
+# 
+# Maintains class balance
+# 🔸 5.2 Model Definitions
+# models = {
+#     'SVM': SVC(...),
+#     'RandomForest': RandomForestClassifier(...),
+#     'MLP': MLPClassifier(...)
+# }
+# 🔸 5.3 Model Training Loop
+# for name, clf in models.items():
+# ✔ Steps:
+# Train model
+# Predict output
+# Evaluate performance
+# 🔹 6. Evaluation Metrics
+# ✔ Accuracy
+# accuracy_score(y_test, y_pred)
+# % of correct predictions
+# ✔ Classification Report
+# classification_report(y_test, y_pred)
+# 
+# Includes:
+# 
+# Precision
+# Recall
+# F1-score
+# ✔ Confusion Matrix
+# confusion_matrix(y_test, y_pred)
+# 📊 Interpretation (CRITICAL)
+# Term	Meaning
+# TP	Correct fault detection
+# TN	Correct normal detection
+# FP	False alarm
+# FN	Missed fault ❗
+# ⚠️ Industrial Insight (VERY IMPORTANT)
+# 
+# False Negatives are dangerous because they represent undetected faults, which may lead to system failure and safety hazards.
+# 
+# 🔹 7. ROC Curve
+# roc_curve(y_test, y_score)
+# ✔ Purpose:
+# Evaluate model performance across thresholds
+# ✔ AUC (Area Under Curve)
+# auc(fpr, tpr)
+# Value	Meaning
+# 1.0	Perfect
+# 0.5	Random
+# 📊 Interpretation:
+# Higher AUC → better model
+# Curve near diagonal → poor model
+
+# The machine learning pipeline demonstrates that different models perform variably depending on data characteristics. Random Forest typically provides robust performance due to its ensemble nature, while SVM captures nonlinear patterns effectively. The MLP model shows potential but may require further tuning.
+# 
+# The ROC curves indicate that models with higher Area Under Curve values provide better classification performance. However, in industrial applications, minimizing false negatives is more critical than maximizing overall accuracy.
+# 
+# Overall, this pipeline provides a comprehensive framework for fault detection and process optimisation in nanoelectronic systems.
+
+# # -------------------------
+# # 6. Conclusion (Markdown)
+# # -------------------------
+# from IPython.display import Markdown, display
+# 
+# 
+# conclusion_text = """
+# ## Conclusion
+# 
+# 
+# In this notebook, we successfully implemented an end-to-end **fault detection workflow** for nanoelectronic systems using machine learning. The key steps included:
+# 
+# 
+# 1. **Dataset loading** and preprocessing, including standardization.
+# 2. **Exploratory Data Analysis (EDA)** to understand feature correlations, distributions, missing values, and variance explained by PCA.
+# 3. **Dimensionality reduction using PCA** and visualization of data separation via a 2D PCA scatter plot overlaid with an SVM decision boundary.
+# 4. **Machine Learning Pipeline** employing SVM, Random Forest, and MLP classifiers, evaluated using accuracy, confusion matrices, classification reports, and ROC curves.
+# 
+# 
+# Overall, the workflow demonstrates that ML models can effectively identify fault patterns in nanoelectronic datasets. This pipeline can be extended to multi-class fault detection, time-series analysis, and integration with real-time sensor data for predictive maintenance and process optimization.
+# """
+# 
+
